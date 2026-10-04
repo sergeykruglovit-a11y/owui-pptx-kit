@@ -504,7 +504,7 @@ def shape_catalogue(prs):
                 par = by_id[par]['parent'] if par in by_id else None
         # containment: which text/pic shapes sit inside a decorative shape (card)
         for it in sl['shapes']:
-            if it.get('role_kind') == 'shape' and it['bbox'] and 0.01 < it['area'] < 0.5:
+            if it.get('role_kind') == 'shape' and it['bbox'] and 0.002 < it['area'] < 0.5:
                 x, y, w, h = it['bbox']
                 inside = []
                 for o in sl['shapes']:
@@ -1286,6 +1286,23 @@ def cmd_build(a):
                     remove_el(el)
             if it.get('role_kind') == 'frame' and it.get('frame') == 'table' and sid not in tables and sid not in keep:
                 remove_el(el)
+        # 1b) decorative shapes (cards, pills) whose texts were all dropped: remove them with their icons,
+        #     otherwise empty cards/pills stay on the slide
+        into = {str(a_.get('into')) for a_ in sp.get('add', [])}
+        for it in cat[k]['shapes']:
+            if it.get('role_kind') != 'shape' or not it.get('contains') or it['id'] in keep or it.get('chrome'):
+                continue
+            texts = [c for c in it['contains'] if info.get(c, {}).get('role_kind') == 'text']
+            if texts and all(c not in fill and c not in keep and c not in clear and c not in into
+                             and not info[c].get('chrome') for c in texts):
+                card_el = find_shape(root, it['id'])
+                if card_el is None:
+                    continue
+                for c in [it['id']] + [c for c in it['contains'] if c not in keep and c not in images]:
+                    el = find_shape(root, c)
+                    if el is not None:
+                        remove_el(el)
+                warnings.append(f'slide {n}: removed empty card/shape #{it["id"]} (its text slots were not filled)')
         # 2) fill
         for sid, val in fill.items():
             el = find_shape(root, sid)
