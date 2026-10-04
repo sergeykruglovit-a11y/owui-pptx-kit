@@ -1430,26 +1430,27 @@ def cmd_qa(a):
                 if not s or not s['bbox']:
                     continue
                 tb = s['el'].find(P + 'txBody')
-                toks = [t for t in set(norm(body_text(tb)).split()) if len(t) >= 4]
+                # count occurrences: a repeated word is "inside" only as many times as it is rendered inside the box
+                toks = Counter(t for t in norm(body_text(tb)).split() if len(t) >= 4)
                 x0, y0 = s['bbox'][0] * sx, s['bbox'][1] * sy
                 x1, y1 = x0 + s['bbox'][2] * sx, y0 + s['bbox'][3] * sy
                 tol = 0.015 * pg['h']
-                outside, below = 0, 0.0
-                for t in toks:
+                outside, total, below = 0, 0, 0.0
+                for t, need in toks.items():
                     cands = idx.get(t)
                     if not cands:
                         continue
-                    def dist(w):
-                        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
-                        dx = max(x0 - tol - cx, 0, cx - x1 - tol)
-                        dy = max(y0 - tol - cy, 0, cy - y1 - tol)
-                        return (dx * dx + dy * dy) ** 0.5, cy
-                    d, cy = min(dist(w) for w in cands)
-                    if d > 0:
-                        outside += 1
-                        below = max(below, (cy - y1) / pg['h'])
-                if toks and outside and (outside / len(toks) > 0.15 or below > 0.03):
-                    sl_issues.append(f'#{sid}: text runs outside its box ({outside}/{len(toks)} words, '
+                    total += need
+                    ins = [w for w in cands if x0 - tol <= (w[0] + w[2]) / 2 <= x1 + tol
+                           and y0 - tol <= (w[1] + w[3]) / 2 <= y1 + tol]
+                    if len(ins) < need:
+                        outside += need - len(ins)
+                        col = [((w[1] + w[3]) / 2 - y1) / pg['h'] for w in cands
+                               if w not in ins and x0 - tol <= (w[0] + w[2]) / 2 <= x1 + tol]
+                        if col:
+                            below = max(below, max(col))
+                if total and outside and (outside / total > 0.1 or below > 0.03):
+                    sl_issues.append(f'#{sid}: text runs outside its box ({outside}/{total} words, '
                                      f'{max(below, 0):.0%} of slide height below) — shorten, shrink or pick a larger slot')
         # side-by-side pair
         ref_png = ref_dir / 'render' / (f'layout-{k:02d}.png' if is_layout else f'slide-{k:02d}.png')
