@@ -215,8 +215,18 @@ def para_styles(txBody):
         sz = rpr.get('sz') if rpr is not None else None
         sty = (f'{int(sz) / 100:g}pt' if sz else '?pt') + (' b' if rpr is not None and rpr.get('b') == '1' else '')
         c = run_color(rpr)
-        out.append(sty + (f' {c}' if c else ''))
+        f = run_font(rpr)
+        out.append(sty + (f' {c}' if c else '') + (f' {f}' if f else ''))
     return out
+
+
+def _sig(p):
+    """Style signature of a template paragraph: size, bold, color, font, level."""
+    rpr = next((r.find(A + 'rPr') for r in p.iter(A + 'r') if r.find(A + 'rPr') is not None), None)
+    if rpr is None:
+        return None
+    ppr = p.find(A + 'pPr')
+    return (rpr.get('sz'), rpr.get('b'), run_color(rpr), run_font(rpr), ppr.get('lvl') if ppr is not None else None)
 
 
 def capacity(bbox, fs, txBody):
@@ -992,16 +1002,32 @@ def fill_text(el, value):
     if not tpl_ps:
         tpl_ps = [etree.SubElement(txBody, A + 'p')]
     nonempty = [i for i, p in enumerate(tpl_ps) if para_text(p).strip()] or [0]
+    # lists (3+ paragraphs): an item takes the style of "its" template paragraph only when that style is the
+    # dominant list style (or it is the first paragraph); one-off accents of the template (e.g. a red last item)
+    # are not inherited by new items
+    regular = list(nonempty)
+    if len(nonempty) >= 3:
+        sigs = Counter(_sig(tpl_ps[i]) for i in nonempty[1:])
+        # drop one-off accent paragraphs (unique style) from the sequence used for new items
+        regular = [nonempty[0]] + [i for i in nonempty[1:] if sigs[_sig(tpl_ps[i])] > 1] or list(nonempty)
+        if len(regular) < 2:
+            regular = list(nonempty)
     new_ps = []
     for j, it in enumerate(items):
         if 'style' in it:
             k = nonempty[min(int(it['style']), len(nonempty) - 1)]
+        elif j < len(regular):
+            k = regular[j]
+        elif len(regular) >= 3 and _sig(tpl_ps[regular[-1]]) != _sig(tpl_ps[regular[-2]]):
+            # alternating pattern (heading / caption …): continue the alternation
+            k = regular[-2 + (j - len(regular)) % 2]
         else:
-            k = nonempty[min(j, len(nonempty) - 1)]
+            k = regular[-1]
         # keep template spacer paragraphs between consecutive styled paragraphs
-        if j and j < len(nonempty) and 'style' not in it and opts.get('spacers', True):
-            for si in range(nonempty[j - 1] + 1, nonempty[j]):
-                new_ps.append(copy.deepcopy(tpl_ps[si]))
+        if j and j < len(regular) and 'style' not in it and opts.get('spacers', True):
+            for si in range(regular[j - 1] + 1, regular[j]):
+                if not para_text(tpl_ps[si]).strip():  # only empty spacer paragraphs, never template text
+                    new_ps.append(copy.deepcopy(tpl_ps[si]))
         if it.get('text', '') == '' and len(items) > 1:
             new_ps.append(_para_from_tpl(tpl_ps[k], '', it.get('level')))
         else:
@@ -1312,7 +1338,8 @@ def cmd_build(a):
             it = info.get(sid, {})
             if isinstance(res, tuple) and res[0] == 'shrink':
                 r = shrink_text(el, it.get('bbox_emu'), res[1])
-                warnings.append(f'slide {n} #{sid}: font scaled x{r:.2f}')
+                if r < 0.995:
+                    warnings.append(f'slide {n} #{sid}: font scaled x{r:.2f}')
             if it.get('markers'):
                 items, _ = _normalize_items(val)
                 for mid in it['markers'][len(items):]:
@@ -1405,6 +1432,19 @@ def cmd_qa(a):
     pdf, pngs = render(a.pptx, out / 'render', dpi=a.dpi)
     pages = pdf_words(pdf) if pdf else []
     tpl_shapes = {s['index']: s['shapes'] for s in prof['slides']}
+    outline = {}
+    if a.src_dir and (Path(a.src_dir) / 'outline.json').exists():
+        for rec in json.loads((Path(a.src_dir) / 'outline.json').read_text()):
+            words = []
+            for b in rec['blocks']:
+                for p in b.get('paragraphs', []):
+                    if not p.get('flag'):
+                        words += norm(p['text']).split()
+                for row in b.get('table', []):
+                    words += norm(' '.join(row)).split()
+            outline[rec['index']] = {w[:5] for w in words if len(w) >= 5}
+    elif not a.src_dir:
+        issues.append('INFO: --src-dir not given — content completeness not checked')
     from PIL import Image, ImageDraw
     report = []
     for n, (slide, sp) in enumerate(zip(prs.slides, plan['slides']), 1):
@@ -1418,6 +1458,17 @@ def cmd_qa(a):
             tb = s['el'].find(P + 'txBody')
             if tb is not None:
                 cur_texts.extend(para_text(p).strip() for p in tb.findall(A + 'p') if para_text(p).strip())
+        # completeness: share of the source slide's words (5-letter stems) visible on the result slide (notes excluded)
+        src_idx = sp.get('source')
+        if outline and src_idx is not None:
+            srcs = src_idx if isinstance(src_idx, list) else [src_idx]
+            need = set().union(*[outline.get(int(i), set()) for i in srcs])
+            have = {w[:5] for w in norm(' '.join(t.text or '' for t in slide._element.iter(A + 't'))).split() if len(w) >= 5}
+            if len(need) >= 8:
+                cov = len(need & have) / len(need)
+                if cov < 0.45:
+                    sl_issues.append(f'content: only {cov:.0%} of source slide {src_idx} words are on the slide — '
+                                     f'content lost or moved to notes; put the key points on the slide')
         # leftovers: template paragraphs still present but not requested
         tpl_paras = set()
         for it in ([] if is_layout else tpl_shapes.get(k, [])):
@@ -1516,6 +1567,7 @@ def main():
     p = sub.add_parser('outline'); p.add_argument('src'); p.add_argument('--out', required=True); p.add_argument('--no-render', action='store_true')
     p = sub.add_parser('build'); p.add_argument('ref'); p.add_argument('plan'); p.add_argument('--out', required=True)
     p = sub.add_parser('qa'); p.add_argument('pptx'); p.add_argument('--plan', required=True); p.add_argument('--ref-dir', required=True)
+    p.add_argument('--src-dir', help='outline dir of the source deck (enables the content-completeness check)')
     p.add_argument('--out', required=True); p.add_argument('--dpi', type=int, default=80)
     a = ap.parse_args()
     {'doctor': cmd_doctor, 'profile': cmd_profile, 'outline': cmd_outline, 'build': cmd_build, 'qa': cmd_qa}[a.cmd](a)
