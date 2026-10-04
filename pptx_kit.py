@@ -388,13 +388,13 @@ def annotate(png, shapes, slide_w, slide_h, out):
         if not s.get('bbox_emu') or s.get('inside_complex'):
             continue
         x, y, w, h = s['bbox_emu']
-        col = (255, 140, 0) if s.get('complex') else colors.get(s['role_kind'])
+        col = (255, 140, 0) if s.get('complex') else colors.get(s.get('role_kind'))
         if not col:
             continue
         box = [x * sx, y * sy, (x + w) * sx, (y + h) * sy]
-        d.rectangle(box, outline=col, width=2 if s['role_kind'] != 'grp' else 1)
+        d.rectangle(box, outline=col, width=2 if s.get('role_kind') != 'grp' else 1)
         lab = '#' + s['id']
-        tx, ty = box[0] + 2, max(0, box[1] + 1) if s['role_kind'] != 'grp' else max(0, box[3] - 12)
+        tx, ty = box[0] + 2, max(0, box[1] + 1) if s.get('role_kind') != 'grp' else max(0, box[3] - 12)
         d.rectangle([tx - 1, ty - 1, tx + 7 * len(lab), ty + 11], fill=col)
         d.text((tx, ty), lab, fill='white')
     im.save(out)
@@ -417,7 +417,7 @@ def shape_catalogue(prs):
                     'bbox_emu': [int(v) for v in bbox] if bbox else None,
                     'bbox': [round(bbox[0] / W, 3), round(bbox[1] / H, 3), round(bbox[2] / W, 3),
                              round(bbox[3] / H, 3)] if bbox else None,
-                    'area': round(area, 4)}
+                    'area': round(area, 4), 'role_kind': kind}
             txBody = el.find(P + 'txBody')
             text = body_text(txBody).strip() if txBody is not None else ''
             sig = None
